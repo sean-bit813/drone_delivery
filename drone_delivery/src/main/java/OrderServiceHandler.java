@@ -13,9 +13,11 @@ import software.amazon.awssdk.services.dynamodb.model.ScanRequest;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.time.Instant;
+import java.util.stream.Collectors;
 
 public class OrderServiceHandler implements RequestHandler<APIGatewayProxyRequestEvent, APIGatewayProxyResponseEvent> {
 
@@ -34,6 +36,7 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
         String httpMethod = request.getHttpMethod();
         String path = request.getPath();
         Map<String, String> pathParameters = request.getPathParameters();
+        context.getLogger().log("Received input: " + request.getBody());
 
         try {
             switch (httpMethod) {
@@ -67,7 +70,7 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
 
     private APIGatewayProxyResponseEvent createOrder(APIGatewayProxyRequestEvent event) throws IOException {
 
-            Map<String, String> order = objectMapper.readValue(event.getBody(), new TypeReference<Map<String, String>>() {});
+        Map<String, String> order = objectMapper.readValue(event.getBody(), new TypeReference<Map<String, String>>() {});
 
             String storeId = order.get("StoreID");
             String userId = order.get("UserID");
@@ -111,8 +114,8 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
                         .withStatusCode(404)
                         .withBody("Order not found");
             } else {
-                // Order exists, serialize it to JSON
-                String jsonOrder = objectMapper.writeValueAsString(response.item());
+                Map<String, String> simpleAttributes = convertAttributes(response.item());
+                String jsonOrder = objectMapper.writeValueAsString(simpleAttributes);
                 return new APIGatewayProxyResponseEvent()
                         .withStatusCode(200)
                         .withBody(jsonOrder);
@@ -139,9 +142,12 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
                         .tableName("Orders")
                         .build();
                 var scanResponse = dynamoDB.scan(scanRequest);
+                List<Map<String, String>> simpleItems = scanResponse.items().stream()
+                        .map(this::convertAttributes)
+                        .collect(Collectors.toList());
                 return new APIGatewayProxyResponseEvent()
                         .withStatusCode(200)
-                        .withBody(objectMapper.writeValueAsString(scanResponse.items()));
+                        .withBody(objectMapper.writeValueAsString(simpleItems));
             } else {
                 // Build a query based on provided parameters
                 String keyConditionExpression = "";
@@ -151,28 +157,29 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
                 if (queryParams.containsKey("UserID")) {
                     keyConditionExpression = "UserID = :userId";
                     expressionAttributeValues.put(":userId", AttributeValue.builder().s(queryParams.get("UserID")).build());
-                    //GSI name
                     indexName = "UserID-CreateAt-index";
                 }
                 if (queryParams.containsKey("StoreID")) {
                     if (!keyConditionExpression.isEmpty()) keyConditionExpression += " and ";
                     keyConditionExpression += "StoreID = :storeId";
                     expressionAttributeValues.put(":storeId", AttributeValue.builder().s(queryParams.get("StoreID")).build());
-                    //GSI name
                     indexName = "StoreID-CreateAt-index";
                 }
 
                 QueryRequest queryRequest = QueryRequest.builder()
                         .tableName("Orders")
-                        .indexName(indexName) // Adjust this based on your DynamoDB GSI settings
+                        .indexName(indexName)
                         .keyConditionExpression(keyConditionExpression)
                         .expressionAttributeValues(expressionAttributeValues)
                         .build();
 
                 var queryResponse = dynamoDB.query(queryRequest);
+                List<Map<String, String>> simpleItems = queryResponse.items().stream()
+                        .map(this::convertAttributes)
+                        .collect(Collectors.toList());
                 return new APIGatewayProxyResponseEvent()
                         .withStatusCode(200)
-                        .withBody(objectMapper.writeValueAsString(queryResponse.items()));
+                        .withBody(objectMapper.writeValueAsString(simpleItems));
             }
         } catch (DynamoDbException e) {
             return new APIGatewayProxyResponseEvent()
@@ -234,6 +241,24 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
         } catch (DynamoDbException e) {
             throw new RuntimeException("Database Error: " + e.getMessage(), e);
         }
+    }
+
+    private String attributeValueToString(AttributeValue value) {
+        // This method converts AttributeValue to a String for simplicity.
+        // You can extend this to handle different types (N, B, SS, etc.) as needed.
+        if (value.s() != null) {
+            return value.s();
+        } else if (value.n() != null) {
+            return value.n();
+        } else if (value.bool() != null) {
+            return value.bool().toString();
+        }
+        return null; // or handle other types as necessary
+    }
+
+    private Map<String, String> convertAttributes(Map<String, AttributeValue> attributes) {
+        return attributes.entrySet().stream()
+                .collect(Collectors.toMap(Map.Entry::getKey, e -> attributeValueToString(e.getValue())));
     }
 }
 
