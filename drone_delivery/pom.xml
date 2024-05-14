@@ -52,6 +52,12 @@
             <version>2.25.50</version>
         </dependency>
 
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sqs</artifactId>
+            <version>2.25.50</version>
+        </dependency>
+
         <!-- AWS SDK for Java v2 (Lambda) -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
