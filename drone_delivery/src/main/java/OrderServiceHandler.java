@@ -9,7 +9,9 @@ import software.amazon.awssdk.services.dynamodb.model.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import software.amazon.awssdk.services.dynamodb.model.ScanRequest;
-
+import software.amazon.awssdk.services.sns.SnsClient;
+import software.amazon.awssdk.services.sns.model.PublishRequest;
+import software.amazon.awssdk.services.sns.model.PublishResponse;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -22,10 +24,15 @@ import java.util.stream.Collectors;
 public class OrderServiceHandler implements RequestHandler<APIGatewayProxyRequestEvent, APIGatewayProxyResponseEvent> {
 
     private final DynamoDbClient dynamoDB;
+    private final SnsClient snsClient;
     private final ObjectMapper objectMapper;
+    private final String snsTopicArn = "arn:aws:sns:us-east-1:533266960984:OrderTopic"; // SNS Topic ARN
 
     public OrderServiceHandler() {
         dynamoDB = DynamoDbClient.builder()
+                .region(Region.US_EAST_1) // my region
+                .build();
+        snsClient = SnsClient.builder()
                 .region(Region.US_EAST_1) // my region
                 .build();
         objectMapper = new ObjectMapper();
@@ -72,31 +79,82 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
 
         Map<String, String> order = objectMapper.readValue(event.getBody(), new TypeReference<Map<String, String>>() {});
 
-            String storeId = order.get("StoreID");
-            String userId = order.get("UserID");
+        String storeId = order.get("StoreID");
+        String userId = order.get("UserID");
 
-            if (!entityExists("Stores", "UUID", storeId)) {
-                return new APIGatewayProxyResponseEvent().withStatusCode(404).withBody("Store not found");
+        if (!entityExists("Stores", "UUID", storeId)) {
+            return new APIGatewayProxyResponseEvent().withStatusCode(404).withBody("Store not found");
+        }
+
+        if (!entityExists("Users", "UUID", userId)) {
+            return new APIGatewayProxyResponseEvent().withStatusCode(404).withBody("User not found");
+        }
+
+        // Fetch region from the Stores table
+        String region = getStoreRegion(storeId);
+        if (region == null) {
+            return new APIGatewayProxyResponseEvent().withStatusCode(500).withBody("Failed to fetch store region");
+        }
+
+        String currentTimestamp = Instant.now().toString();
+        String orderId = UUID.randomUUID().toString();
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put("UUID", AttributeValue.builder().s(orderId).build());
+        item.put("StoreID", AttributeValue.builder().s(storeId).build());
+        item.put("UserID", AttributeValue.builder().s(userId).build());
+        item.put("CreateAt", AttributeValue.builder().s(currentTimestamp).build());
+        item.put("Status", AttributeValue.builder().s("created").build());
+        item.put("AssignedTo", AttributeValue.builder().s("").build());
+        item.put("Version", AttributeValue.builder().n("1").build());
+
+        PutItemRequest request = PutItemRequest.builder()
+                .tableName("Orders")
+                .item(item)
+                .build();
+
+        dynamoDB.putItem(request);
+
+        // Push the order info to SNS
+        Map<String, String> orderInfo = new HashMap<>();
+        orderInfo.put("UUID", orderId);
+        orderInfo.put("StoreID", storeId);
+        orderInfo.put("UserID", userId);
+        orderInfo.put("Status", "created");
+        orderInfo.put("AssignedTo", "");
+        orderInfo.put("Version", "1");
+        orderInfo.put("Region", region);
+
+        String message = objectMapper.writeValueAsString(orderInfo);
+        PublishRequest publishRequest = PublishRequest.builder()
+                .topicArn(snsTopicArn)
+                .message(message)
+                .build();
+
+        PublishResponse publishResponse = snsClient.publish(publishRequest);
+
+        if (publishResponse.sdkHttpResponse().isSuccessful()) {
+            return new APIGatewayProxyResponseEvent().withStatusCode(201).withBody("Order created and published successfully");
+        } else {
+            return new APIGatewayProxyResponseEvent().withStatusCode(500).withBody("Order created but failed to publish to SNS");
+        }
+    }
+
+    private String getStoreRegion(String storeId) {
+        GetItemRequest request = GetItemRequest.builder()
+                .tableName("Stores")
+                .key(Map.of("UUID", AttributeValue.builder().s(storeId).build()))
+                .build();
+
+        try {
+            GetItemResponse response = dynamoDB.getItem(request);
+            if (response.item() == null || response.item().isEmpty()) {
+                return null;
+            } else {
+                return response.item().get("Region").s();
             }
-
-            if (!entityExists("Users", "UUID", userId)) {
-                return new APIGatewayProxyResponseEvent().withStatusCode(404).withBody("User not found");
-            }
-
-            String currentTimestamp = Instant.now().toString();
-            PutItemRequest request = PutItemRequest.builder()
-                    .tableName("Orders")
-                    .item(Map.of(
-                            "UUID", AttributeValue.builder().s(UUID.randomUUID().toString()).build(),
-                            "StoreID", AttributeValue.builder().s(storeId).build(),
-                            "UserID", AttributeValue.builder().s(userId).build(),
-                            "CreateAt", AttributeValue.builder().s(currentTimestamp).build()
-                    ))
-                    .build();
-
-            dynamoDB.putItem(request);
-            return new APIGatewayProxyResponseEvent().withStatusCode(201).withBody("Order created successfully");
-
+        } catch (DynamoDbException e) {
+            return null;
+        }
     }
 
     private APIGatewayProxyResponseEvent getOrderByID(String orderId) {
@@ -129,7 +187,6 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
                     .withStatusCode(500)
                     .withBody("Error processing order data: " + e.getMessage());
         }
-
     }
 
     private APIGatewayProxyResponseEvent getOrdersByFilter(APIGatewayProxyRequestEvent event) {
@@ -261,4 +318,5 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
                 .collect(Collectors.toMap(Map.Entry::getKey, e -> attributeValueToString(e.getValue())));
     }
 }
+
 
