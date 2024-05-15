@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import software.amazon.awssdk.services.dynamodb.model.ScanRequest;
 import software.amazon.awssdk.services.sns.SnsClient;
+import software.amazon.awssdk.services.sns.model.MessageAttributeValue;
 import software.amazon.awssdk.services.sns.model.PublishRequest;
 import software.amazon.awssdk.services.sns.model.PublishResponse;
 
@@ -122,12 +123,18 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
         orderInfo.put("Status", "created");
         orderInfo.put("AssignedTo", "");
         orderInfo.put("Version", "1");
-        orderInfo.put("Region", region);
+
+        Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
+        messageAttributes.put("Region", MessageAttributeValue.builder()
+                .dataType("String")
+                .stringValue(region)
+                .build());
 
         String message = objectMapper.writeValueAsString(orderInfo);
         PublishRequest publishRequest = PublishRequest.builder()
                 .topicArn(snsTopicArn)
                 .message(message)
+                .messageAttributes(messageAttributes)
                 .build();
 
         PublishResponse publishResponse = snsClient.publish(publishRequest);

@@ -7,6 +7,7 @@ import software.amazon.awssdk.services.sqs.model.DeleteMessageRequest;
 import software.amazon.awssdk.services.sqs.model.Message;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.HashMap;
@@ -53,9 +54,18 @@ public class Matcher {
 
             for (Message message : messages) {
                 try {
-                    Map<String, String> orderInfo = objectMapper.readValue(message.body(), Map.class);
-                    handleOrderMessage(orderInfo, message.receiptHandle());
+                    Map<String, String> snsMessage = objectMapper.readValue(message.body(), Map.class);
+                    String orderInfoJson = snsMessage.get("Message");
+
+                    if (orderInfoJson != null) {
+                        Map<String, String> orderInfo = objectMapper.readValue(orderInfoJson, Map.class);
+                        handleOrderMessage(orderInfo, message.receiptHandle());
+                    } else {
+                        System.err.println("Order information is missing in the SNS message.");
+                        deleteMessage(message.receiptHandle());
+                    }
                 } catch (Exception e) {
+                    System.err.println("Error processing message: " + e.getMessage());
                     e.printStackTrace();
                 }
             }
@@ -66,8 +76,14 @@ public class Matcher {
         String orderId = orderInfo.get("UUID");
         String storeId = orderInfo.get("StoreID");
         String userId = orderInfo.get("UserID");
-        String region = orderInfo.get("Region");
-        int version = Integer.parseInt(orderInfo.get("Version"));
+        String version = orderInfo.get("Version");
+
+        if (orderId == null || orderId.isEmpty() || storeId == null || storeId.isEmpty() || userId == null || userId.isEmpty() || version == null || version.isEmpty()) {
+            System.out.println(orderInfo);
+            System.out.println("Invalid order data. Deleting message...");
+            deleteMessage(receiptHandle);
+            return;
+        }
 
         GetItemRequest getOrderRequest = GetItemRequest.builder()
                 .tableName(ORDERS_TABLE)
@@ -76,41 +92,53 @@ public class Matcher {
 
         GetItemResponse getOrderResponse = dynamoDB.getItem(getOrderRequest);
         if (getOrderResponse.item() == null || getOrderResponse.item().isEmpty()) {
+            System.out.println("Order not found. Deleting message...");
             deleteMessage(receiptHandle);
             return;
         }
 
-        int currentVersion = Integer.parseInt(getOrderResponse.item().get("Version").n());
-        if (currentVersion != version) {
+        String currentVersion = getOrderResponse.item().get("Version").n();
+        if (!currentVersion.equals(version)) {
+            System.out.println("Version mismatch. Deleting message...");
             deleteMessage(receiptHandle);
             return;
         }
+        Map<String, String> expressionAttributeNames = new HashMap<>();
+        expressionAttributeNames.put("#status", "Status");
 
         ScanRequest scanRequest = ScanRequest.builder()
                 .tableName(DRONES_TABLE)
-                .filterExpression("Status = :active")
+                .filterExpression("#status = :active")
+                .expressionAttributeNames(expressionAttributeNames)
                 .expressionAttributeValues(Map.of(":active", AttributeValue.builder().s("ACTIVE").build()))
                 .build();
 
         ScanResponse scanResponse = dynamoDB.scan(scanRequest);
         if (scanResponse.items().isEmpty()) {
+            System.out.println("No available drones found.");
             return;
         }
 
         Map<String, AttributeValue> drone = scanResponse.items().get(0);
         String droneId = drone.get("UUID").s();
 
-        updateOrder(orderId, version + 1, droneId);
+        if (droneId == null || droneId.isEmpty()) {
+            System.out.println("Invalid drone data.");
+            return;
+        }
+
+        updateOrder(orderId, String.valueOf(Integer.parseInt(version) + 1), droneId);
         updateDrone(droneId);
 
+        System.out.println("Order updated and drone matched. Deleting message...");
         deleteMessage(receiptHandle);
     }
 
-    private void updateOrder(String orderId, int newVersion, String droneId) {
+    private void updateOrder(String orderId, String newVersion, String droneId) {
         Map<String, AttributeValueUpdate> updates = new HashMap<>();
         updates.put("Status", AttributeValueUpdate.builder().value(AttributeValue.builder().s("assigned").build()).action(AttributeAction.PUT).build());
         updates.put("AssignedTo", AttributeValueUpdate.builder().value(AttributeValue.builder().s(droneId).build()).action(AttributeAction.PUT).build());
-        updates.put("Version", AttributeValueUpdate.builder().value(AttributeValue.builder().n(String.valueOf(newVersion)).build()).action(AttributeAction.PUT).build());
+        updates.put("Version", AttributeValueUpdate.builder().value(AttributeValue.builder().n(newVersion).build()).action(AttributeAction.PUT).build());
 
         UpdateItemRequest updateRequest = UpdateItemRequest.builder()
                 .tableName(ORDERS_TABLE)
@@ -119,6 +147,7 @@ public class Matcher {
                 .build();
 
         dynamoDB.updateItem(updateRequest);
+        System.out.println("Order updated successfully: " + orderId);
     }
 
     private void updateDrone(String droneId) {
@@ -132,6 +161,7 @@ public class Matcher {
                 .build();
 
         dynamoDB.updateItem(updateRequest);
+        System.out.println("Drone status updated successfully: " + droneId);
     }
 
     private void deleteMessage(String receiptHandle) {
@@ -140,5 +170,7 @@ public class Matcher {
                 .receiptHandle(receiptHandle)
                 .build();
         sqsClient.deleteMessage(deleteMessageRequest);
+        System.out.println("Message deleted successfully from SQS.");
     }
 }
+
