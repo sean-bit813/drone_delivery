@@ -75,7 +75,8 @@ public class DroneServiceHandler implements RequestHandler<APIGatewayProxyReques
                 .tableName("Drones")
                 .item(Map.of(
                         "UUID", AttributeValue.builder().s(uuid).build(),
-                        "Status", AttributeValue.builder().s("ACTIVE").build()
+                        "Status", AttributeValue.builder().s("ACTIVE").build(),
+                        "Location", AttributeValue.builder().s("0,0").build()
                 ))
                 .build();
 

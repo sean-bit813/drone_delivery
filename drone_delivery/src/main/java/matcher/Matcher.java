@@ -11,9 +11,7 @@ import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 public class Matcher {
 
@@ -78,8 +76,9 @@ public class Matcher {
         String storeId = orderInfo.get("StoreID");
         String userId = orderInfo.get("UserID");
         String version = orderInfo.get("Version");
+        String storeLocation = orderInfo.get("StoreLocation");
 
-        if (orderId == null || orderId.isEmpty() || storeId == null || storeId.isEmpty() || userId == null || userId.isEmpty() || version == null || version.isEmpty()) {
+        if (orderId == null || orderId.isEmpty() || storeId == null || storeId.isEmpty() || userId == null || userId.isEmpty() || version == null || version.isEmpty() || storeLocation == null || storeLocation.isEmpty()) {
             System.out.println(orderInfo);
             System.out.println("Invalid order data. Deleting message...");
             deleteMessage(receiptHandle);
@@ -120,8 +119,10 @@ public class Matcher {
             return;
         }
 
-        Map<String, AttributeValue> drone = scanResponse.items().get(0);
-        String droneId = drone.get("UUID").s();
+        List<Map<String, AttributeValue>> activeDrones = scanResponse.items();
+
+        Map<String, AttributeValue> nearestDrone = findNearestDrone(storeLocation, activeDrones);
+        String droneId = nearestDrone.get("UUID").s();
 
         if (droneId == null || droneId.isEmpty()) {
             System.out.println("Invalid drone data.");
@@ -133,6 +134,48 @@ public class Matcher {
 
         System.out.println("Order updated and drone matched. Deleting message...");
         deleteMessage(receiptHandle);
+    }
+
+    private Map<String, AttributeValue> findNearestDrone(String storeLocation, List<Map<String, AttributeValue>> drones) {
+        String[] storeLocationParts = storeLocation.split(",");
+        double storeLat = Double.parseDouble(storeLocationParts[0]);
+        double storeLon = Double.parseDouble(storeLocationParts[1]);
+
+        double minDistance = Double.MAX_VALUE;
+        List<Map<String, AttributeValue>> nearestDrones = new ArrayList<>();
+
+        for (Map<String, AttributeValue> drone : drones) {
+            String[] droneLocationParts = drone.get("Location").s().split(",");
+            double droneLat = Double.parseDouble(droneLocationParts[0]);
+            double droneLon = Double.parseDouble(droneLocationParts[1]);
+
+            double distance = calculateHaversineDistance(storeLat, storeLon, droneLat, droneLon);
+
+            if (distance < minDistance) {
+                minDistance = distance;
+                nearestDrones.clear();
+                nearestDrones.add(drone);
+            } else if (distance == minDistance) {
+                nearestDrones.add(drone);
+            }
+        }
+
+        Random rand = new Random();
+        return nearestDrones.get(rand.nextInt(nearestDrones.size()));
+    }
+
+    private double calculateHaversineDistance(double lat1, double lon1, double lat2, double lon2) {
+        final int R = 6371; // Radius of the Earth in kilometers
+
+        double latDistance = Math.toRadians(lat2 - lat1);
+        double lonDistance = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(latDistance / 2) * Math.sin(latDistance / 2)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                * Math.sin(lonDistance / 2) * Math.sin(lonDistance / 2);
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        double distance = R * c; // convert to kilometers
+
+        return distance;
     }
 
     private void updateOrder(String orderId, String newVersion, String droneId) {

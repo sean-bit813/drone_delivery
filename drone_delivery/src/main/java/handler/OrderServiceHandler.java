@@ -93,11 +93,14 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
             return new APIGatewayProxyResponseEvent().withStatusCode(404).withBody("User not found");
         }
 
-        // Fetch region from the Stores table
-        String region = getStoreRegion(storeId);
-        if (region == null) {
-            return new APIGatewayProxyResponseEvent().withStatusCode(500).withBody("Failed to fetch store region");
+        // Fetch region and location from the Stores table
+        Map<String, String> storeInfo = getStoreInfo(storeId);
+        if (storeInfo == null) {
+            return new APIGatewayProxyResponseEvent().withStatusCode(500).withBody("Failed to fetch store info");
         }
+
+        String region = storeInfo.get("Region");
+        String storeLocation = storeInfo.get("Location");
 
         String currentTimestamp = Instant.now().toString();
         String orderId = UUID.randomUUID().toString();
@@ -109,6 +112,7 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
         item.put("Status", AttributeValue.builder().s("created").build());
         item.put("AssignedTo", AttributeValue.builder().s("").build());
         item.put("Version", AttributeValue.builder().n("1").build());
+        item.put("StoreLocation", AttributeValue.builder().s(storeLocation).build());
 
         PutItemRequest request = PutItemRequest.builder()
                 .tableName("Orders")
@@ -122,6 +126,7 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
         orderInfo.put("UUID", orderId);
         orderInfo.put("StoreID", storeId);
         orderInfo.put("UserID", userId);
+        orderInfo.put("StoreLocation", storeLocation);
         orderInfo.put("Status", "created");
         orderInfo.put("AssignedTo", "");
         orderInfo.put("Version", "1");
@@ -148,7 +153,7 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
         }
     }
 
-    private String getStoreRegion(String storeId) {
+    private Map<String, String> getStoreInfo(String storeId) {
         GetItemRequest request = GetItemRequest.builder()
                 .tableName("Stores")
                 .key(Map.of("UUID", AttributeValue.builder().s(storeId).build()))
@@ -159,7 +164,10 @@ public class OrderServiceHandler implements RequestHandler<APIGatewayProxyReques
             if (response.item() == null || response.item().isEmpty()) {
                 return null;
             } else {
-                return response.item().get("Region").s();
+                Map<String, String> storeInfo = new HashMap<>();
+                storeInfo.put("Region", response.item().get("Region").s());
+                storeInfo.put("Location", response.item().get("Location").s());
+                return storeInfo;
             }
         } catch (DynamoDbException e) {
             return null;
