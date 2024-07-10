@@ -50,6 +50,7 @@ public class DroneRecordProcessor implements ShardRecordProcessor {
 
                 findAssignedOrder(droneUUID).thenAccept(assignedOrder -> {
                     if (assignedOrder == null) {
+                        log.info("No assigned order found for droneID: {}", droneUUID);
                         return; // No-op if no assigned order
                     }
 
@@ -109,6 +110,7 @@ public class DroneRecordProcessor implements ShardRecordProcessor {
     }
 
     private CompletableFuture<Map<String, AttributeValue>> findAssignedOrder(String droneUUID) {
+        log.info("Finding assigned order for droneID: {}", droneUUID);
         QueryRequest queryRequest = QueryRequest.builder()
                 .tableName("Orders")
                 .indexName("AssignedTo-index")
@@ -116,15 +118,26 @@ public class DroneRecordProcessor implements ShardRecordProcessor {
                 .expressionAttributeValues(Map.of(":droneUUID", AttributeValue.builder().s(droneUUID).build()))
                 .build();
         return dynamoDbClient.query(queryRequest).thenApply(QueryResponse::items)
-                .thenApply(items -> items.isEmpty() ? null : items.get(0));
+                .thenApply(items -> {
+                    if (items.isEmpty()) {
+                        log.info("No assigned order found for droneID: {}", droneUUID);
+                        return null;
+                    }
+                    log.info("Assigned order found for droneID: {}", droneUUID);
+                    return items.get(0);
+                });
     }
 
     private CompletableFuture<Map<String, AttributeValue>> findLocation(String tableName, String id) {
+        log.info("Finding location for table: {}, ID: {}", tableName, id);
         GetItemRequest getItemRequest = GetItemRequest.builder()
                 .tableName(tableName)
                 .key(Map.of("UUID", AttributeValue.builder().s(id).build()))
                 .build();
-        return dynamoDbClient.getItem(getItemRequest).thenApply(GetItemResponse::item);
+        return dynamoDbClient.getItem(getItemRequest).thenApply(response -> {
+            log.info("Location found for table: {}, ID: {}", tableName, id);
+            return response.item();
+        });
     }
 
     private double calculateHaversineDistance(double[] start, double[] end) {
@@ -148,17 +161,20 @@ public class DroneRecordProcessor implements ShardRecordProcessor {
         String orderStatus = assignedOrder.get("Status").s();
         String orderId = assignedOrder.get("UUID").s();
 
-        if ("Assigned".equals(orderStatus) && distanceToStore < 5) {
+        log.info("Updating order status for orderID: {}", orderId);
+        if ("assigned".equals(orderStatus) && distanceToStore < 5) {
             updateOrder(orderId, "PickupCompleted");
+            updateDroneStatus(droneUUID, "PickupCompleted");
         } else if ("PickupCompleted".equals(orderStatus) && distanceToUser < 5) {
             updateOrder(orderId, "DropoffCompleted");
         } else if ("DropoffCompleted".equals(orderStatus)) {
             updateOrder(orderId, "Completed");
-            updateDroneStatus(droneUUID, "Active");
+            updateDroneStatus(droneUUID, "ACTIVE");
         }
     }
 
     private void updateOrder(String orderId, String newStatus) {
+        log.info("Updating orderID: {} to new status: {}", orderId, newStatus);
         UpdateItemRequest updateRequest = UpdateItemRequest.builder()
                 .tableName("Orders")
                 .key(Map.of("UUID", AttributeValue.builder().s(orderId).build()))
@@ -166,10 +182,11 @@ public class DroneRecordProcessor implements ShardRecordProcessor {
                         .value(AttributeValue.builder().s(newStatus).build())
                         .action(AttributeAction.PUT).build()))
                 .build();
-        dynamoDbClient.updateItem(updateRequest);
+        dynamoDbClient.updateItem(updateRequest).thenRun(() -> log.info("OrderID: {} updated to new status: {}", orderId, newStatus));
     }
 
     private void updateDroneStatus(String droneUUID, String newStatus) {
+        log.info("Updating droneID: {} to new status: {}", droneUUID, newStatus);
         UpdateItemRequest updateRequest = UpdateItemRequest.builder()
                 .tableName("Drones")
                 .key(Map.of("UUID", AttributeValue.builder().s(droneUUID).build()))
@@ -177,6 +194,6 @@ public class DroneRecordProcessor implements ShardRecordProcessor {
                         .value(AttributeValue.builder().s(newStatus).build())
                         .action(AttributeAction.PUT).build()))
                 .build();
-        dynamoDbClient.updateItem(updateRequest);
+        dynamoDbClient.updateItem(updateRequest).thenRun(() -> log.info("DroneID: {} updated to new status: {}", droneUUID, newStatus));
     }
 }

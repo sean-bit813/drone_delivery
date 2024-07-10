@@ -11,16 +11,15 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
 
-import java.io.*;
 import java.nio.ByteBuffer;
-import java.nio.file.*;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
-import java.util.Timer;
-import java.util.TimerTask;
 
 public class KplApp {
 
-    private static final String STREAM_NAME = "dronelocation";
+    private static final String STREAM_NAME = "dronelocation1";
     private static final String REGION = "us-east-1";
     private static final String DRONES_TABLE = "Drones";
     private static final String ORDERS_TABLE = "Orders";
@@ -28,14 +27,16 @@ public class KplApp {
     private static final String USERS_TABLE = "Users";
 
     private static final Random RANDOM = new Random();
-    private static final double MOVEMENT_RANGE = 0.001; // Adjust this value for movement range
+    private static final double MOVEMENT_RANGE = 5; // Adjust this value for movement range
 
     private final KinesisProducer producer;
     private final DynamoDbClient dynamoDB;
     private final ObjectMapper objectMapper;
 
-    public KplApp() {
+    // Map to store the last known location of each drone
+    private final Map<String, String> droneLocations;
 
+    public KplApp() {
         KinesisProducerConfiguration config = new KinesisProducerConfiguration();
         config.setRegion(REGION);
         config.setMaxConnections(1);
@@ -49,10 +50,11 @@ public class KplApp {
 
         dynamoDB = DynamoDbClient.builder()
                 .region(Region.of(REGION))
-                .credentialsProvider(DefaultCredentialsProvider.create()) // Set credentials provider
+                .credentialsProvider(DefaultCredentialsProvider.create())
                 .build();
 
         objectMapper = new ObjectMapper();
+        droneLocations = new HashMap<>();
     }
 
     public static void main(String[] args) {
@@ -89,21 +91,30 @@ public class KplApp {
 
     private void updateDroneLocation(String droneID, String status) {
         try {
-            GetItemRequest getRequest = GetItemRequest.builder()
-                    .tableName(DRONES_TABLE)
-                    .key(Map.of("UUID", AttributeValue.builder().s(droneID).build()))
-                    .build();
+            String currentLocation = droneLocations.getOrDefault(droneID, null);
 
-            GetItemResponse getResponse = dynamoDB.getItem(getRequest);
-            Map<String, AttributeValue> item = getResponse.item();
+            // If we don't have a last known location in the map, fetch it from DynamoDB
+            if (currentLocation == null) {
+                GetItemRequest getRequest = GetItemRequest.builder()
+                        .tableName(DRONES_TABLE)
+                        .key(Map.of("UUID", AttributeValue.builder().s(droneID).build()))
+                        .build();
 
-            if (item != null && !item.isEmpty()) {
-                String currentLocation = item.get("Location").s();
-                String newLocation = calculateNewLocation(currentLocation, status, droneID);
-                sendLocationUpdate(droneID, newLocation);
-            } else {
-                System.out.println("Drone not found: " + droneID);
+                GetItemResponse getResponse = dynamoDB.getItem(getRequest);
+                Map<String, AttributeValue> item = getResponse.item();
+
+                if (item != null && !item.isEmpty()) {
+                    currentLocation = item.get("Location").s();
+                    droneLocations.put(droneID, currentLocation);
+                } else {
+                    System.out.println("Drone not found: " + droneID);
+                    return;
+                }
             }
+
+            String newLocation = calculateNewLocation(currentLocation, status, droneID);
+            sendLocationUpdate(droneID, newLocation);
+            droneLocations.put(droneID, newLocation);
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -201,11 +212,47 @@ public class KplApp {
             String locationJson = objectMapper.writeValueAsString(locationUpdate);
             ByteBuffer data = ByteBuffer.wrap(locationJson.getBytes());
 
-            // Use droneID as partition key to ensure each drone's data goes to its respective shard
-            producer.addUserRecord(STREAM_NAME, droneID, data);
+            // Hash the partition key to distribute across shards
+            String partitionKey = hashPartitionKey(droneID);
+
+            // Add detailed logging to track partition key and data
+            System.out.println("Sending location update - Partition Key: " + partitionKey + ", Data: " + locationJson);
+
+            // Use hashed partition key to ensure better distribution
+            producer.addUserRecord(STREAM_NAME, partitionKey, data);
             System.out.println("Sent location update for " + droneID + ": " + newLocation);
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
+
+    private String hashPartitionKey(String partitionKey) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(partitionKey.getBytes(StandardCharsets.UTF_8));
+            return bytesToHex(hash);
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("No such algorithm exception for SHA-256", e);
+        }
+    }
+
+    private String bytesToHex(byte[] bytes) {
+        StringBuilder hexString = new StringBuilder();
+        for (byte b : bytes) {
+            String hex = Integer.toHexString(0xff & b);
+            if (hex.length() == 1) hexString.append('0');
+            hexString.append(hex);
+        }
+        return hexString.toString();
+    }
 }
+
+
+
+
+
+
+
+
+
+

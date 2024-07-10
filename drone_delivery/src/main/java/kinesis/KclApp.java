@@ -16,17 +16,15 @@ import java.util.concurrent.Executors;
 
 public class KclApp {
 
-    private static final String STREAM_NAME = "dronelocation";
+    private static final String STREAM_NAME = "dronelocation1";
     private static final String REGION = "us-east-1";
     private static final String APPLICATION_NAME = "DroneDeliveryApp";
     private static final String WORKER_ID = "worker-" + UUID.randomUUID().toString();
 
     public static void main(String[] args) {
+        System.out.println("Starting KCL application...");
+
         KinesisAsyncClient kinesisClient = KinesisClientUtil.createKinesisAsyncClient(KinesisAsyncClient.builder().region(Region.of(REGION)));
-        //KinesisAsyncClient kinesisClient = KinesisAsyncClient.builder()
-                //.region(Region.of(REGION))
-                //.credentialsProvider(DefaultCredentialsProvider.create())
-                //.build();
 
         DynamoDbAsyncClient dynamoDbClient = DynamoDbAsyncClient.builder()
                 .region(Region.of(REGION))
@@ -59,6 +57,9 @@ public class KclApp {
                 configsBuilder.retrievalConfig().retrievalSpecificConfig(new PollingConfig(STREAM_NAME, kinesisClient))
         );
 
-        Executors.newSingleThreadExecutor().execute(scheduler);
+        Executors.newSingleThreadExecutor().execute(() -> {
+            System.out.println("Scheduler started.");
+            scheduler.run();
+        });
     }
 }
